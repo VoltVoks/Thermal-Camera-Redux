@@ -5,6 +5,7 @@
 
 #if ! DRAW_SINGLE_THREAD // Moved to mainPrivate() for single thread builds
 		pthread_mutex_lock( &lockAutoRangingMutex_image );
+                Rect imageFrameROI = getImageFrameROI( *(threadData.rawFrame) );
                 imageFrame = Mat( *(threadData.rawFrame), imageFrameROI ).clone();
                 if ( RotateDisplay ) { rotate( imageFrame, imageFrame, rotateFlags[ RotateDisplay ] ); }
 		pthread_mutex_unlock( &lockAutoRangingMutex_image );
@@ -26,6 +27,12 @@
 
                         if ( Use_Histogram ) {
                                 histogramWrapper( imageFrame, imageFrame, 0 );
+                        }
+
+                        if ( imageFrame.empty() || (imageFrame.cols & 1) ) {
+                                fprintf(stderr, "imageFrame invalid rows(%d) cols(%d) type(%d)\n",
+                                        imageFrame.rows, imageFrame.cols, imageFrame.type());
+                                fflush(stderr);
                         }
 
                         // Convert the composited image copy to RGB

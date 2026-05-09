@@ -1,0 +1,6 @@
+build/
+src/mini640-viewer
+src/redux
+src/redux-min
+src/test_driver
+*.o

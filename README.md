@@ -2,6 +2,19 @@
 
 # NOTE: SUPPORT FOR THIS ACCOUNT WILL GO DORMANT ONCE GITHUB FORCE BLOCKS IT FOR 2FA.  SUBSEQUENT UPDATES MAYBE HOMED ELSEWHERE.  UPDATES WILL BE NOTED ON THE EEVBLOG FORUM.
 
+## Local Mini640 / 2bdf:0102 workflow
+
+This working copy includes local Mini640 support in addition to the original TC001 Redux app.
+
+```bash
+./run-thermal-camera.sh --camera-profile auto
+./run-thermal-camera.sh --camera-profile mini640
+./run-thermal-camera.sh --camera-profile mini640 --capture-reference 23.4
+./run-thermal-camera.sh --camera-profile tc001 -d 2
+```
+
+Mini640 calibration is stored per device under `~/.config/thermal-camera-redux/`. See `MINI640_FIXES.md` for the current frame format, calibration, and UVC-extension notes.
+
  Topdon TC001 (and clones: Topdon TS001, InfiRay P2 Pro, MaAnt Super IR Cam, etc.) Linux thermal camera app to read and display live and offline thermal data.<br />
 
 Ported and updated to Linux C/C++ app based on Les Wright's 21 June 2023 PyThermalCamera Python app.<br />
@@ -212,4 +225,3 @@ Reported working (by Artag, 2024/07/15) on "Topdon TS001" thermal camera running
   
 
   
-

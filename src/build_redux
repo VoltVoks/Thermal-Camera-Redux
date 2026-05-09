@@ -1,10 +1,14 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
 # Build Thermal Camera Redux 
 
-echo "Building redux and test_driver ..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+BUILD_DIR="$ROOT/build"
+mkdir -p "$BUILD_DIR"
 
-rm ./redux
+echo "Building redux and test_driver into $BUILD_DIR ..."
 
 # Change build flags based on your hardware
 # Ivybridge Intel Chips
@@ -58,10 +62,13 @@ DEFAULT_FLAGS='-DBORDER_LAYOUT=0 -DDEFAULT_FONT=0 -DDEFAULT_COLORMAP=4 -DROTATIO
 #DEFAULT_FLAGS='-DBORDER_LAYOUT=0 -DDEFAULT_FONT=0 -DDEFAULT_COLORMAP=4 -DROTATION=0 -DDISPLAY_WIDTH=1280 -DDISPLAY_HEIGHT=1024 -DUSE_CELSIUS=0 -DHUD_ALPHA=0.4'
 
 # Compile and link Redux Thermal Camera code
-g++ -Wall -Wextra -O3 -ffast-math ${DEFAULT_FLAGS} ${CFLAGS} -DUSE_ASSERT=0 -I/usr/include/opencv4 tc001.cpp thread.cpp -o redux -lpthread `pkg-config --cflags --libs opencv4`
+g++ -Wall -Wextra -O3 -ffast-math ${DEFAULT_FLAGS} ${CFLAGS} -DUSE_ASSERT=0 \
+	`pkg-config --cflags opencv4` "$SCRIPT_DIR/tc001.cpp" "$SCRIPT_DIR/thread.cpp" \
+	-o "$BUILD_DIR/redux" -lpthread \
+	-lopencv_core -lopencv_imgproc -lopencv_highgui -lopencv_videoio -lopencv_imgcodecs
 
 
 # Debug for gprof, valgrind and perf
-#g++ -Wall -Wextra -ffast-math -pg -ggdb3 ${DEFAULT_FLAGS} ${CFLAGS} -DUSE_ASSERT=0 -I/usr/include/opencv4 tc001.cpp thread.cpp -o redux -lpthread `pkg-config --cflags --libs opencv4`
+#g++ -Wall -Wextra -ffast-math -pg -ggdb3 ${DEFAULT_FLAGS} ${CFLAGS} -DUSE_ASSERT=0 `pkg-config --cflags opencv4` "$SCRIPT_DIR/tc001.cpp" "$SCRIPT_DIR/thread.cpp" -o "$BUILD_DIR/redux" -lpthread -lopencv_core -lopencv_imgproc -lopencv_highgui -lopencv_videoio -lopencv_imgcodecs
 
-gcc -Wall test_driver.c -o test_driver
+gcc -Wall "$SCRIPT_DIR/test_driver.c" -o "$BUILD_DIR/test_driver"

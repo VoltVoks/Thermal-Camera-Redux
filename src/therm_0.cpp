@@ -6,6 +6,7 @@
 			pthread_mutex_lock( &lockAutoRangingMutex_therm );
 
 #if ! DRAW_SINGLE_THREAD // Moved to mainPrivate() for single thread builds
+			Rect thermFrameROI = getThermalFrameROI( *(threadData.rawFrame) );
                 	thermalFrame = Mat( *(threadData.rawFrame), thermFrameROI ).clone();
                 	if ( RotateDisplay ) { rotate( thermalFrame, thermalFrame, rotateFlags[ RotateDisplay ] ); }
 #endif
@@ -69,6 +70,11 @@
                                 thermalFramePtr = &thermalFrame;
                         }
 
+                        if ( thermalFramePtr->empty() || (thermalFramePtr->cols & 1) ) {
+                                fprintf(stderr, "thermalFrame invalid rows(%d) cols(%d) type(%d)\n",
+                                        thermalFramePtr->rows, thermalFramePtr->cols, thermalFramePtr->type());
+                                fflush(stderr);
+                        }
 
                         // Convert the composited image copy to RGB
                         // cv::cvtColor (InputArray src, OutputArray dst, int code, int dstCn=0)

@@ -862,6 +862,16 @@ float kelvin2Celsius(unsigned short kelvin) { // # LeoDJ's Kelvin conversion alg
 	return ( ((float)kelvin / 64.0) - 273.15 );
 }
 
+static double clampDouble(double value, double minValue, double maxValue) {
+	if ( value < minValue ) return minValue;
+	if ( value > maxValue ) return maxValue;
+	return value;
+}
+
+static void resetCalibrationDefaults();
+static float calibratedKelvinToCelsius(unsigned short kelvin);
+static void printCalibrationStatus();
+
 // Used to convert threshold to kelvin for optimized comparisons
 long celsius2Kelvin(float celsius) { // # LeoDJ's Kelvin conversion algorithm, post #216
 	//  celsius                  = (kelvin / 64.0) - 273.15
@@ -979,11 +989,75 @@ typedef struct {
 	bool fullscreen;
 } Controls;
 
+typedef struct {
+	double emissivity;
+	double reflectedCelsius;
+	double offsetCelsius;
+} TemperatureCalibration;
+
 
 #define MAX_USER_TEMPS 13
 #define CENTER_OF_RULER_INDEX (MAX_USER_TEMPS - 1)
 static Temperature users[ MAX_USER_TEMPS ];  // User temps XOR Ruler Temps
 static Controls controls;
+static TemperatureCalibration calibration;
+
+static Rect getImageFrameROI(const Mat &rawFrame) {
+	int rawRows = rawFrame.rows;
+	int halfRows = rawRows / 2;
+	int trimPerHalf = max(0, halfRows - FIXED_TC_HEIGHT);
+	int startY = trimPerHalf / 2;
+
+	if ( rawRows < (FIXED_TC_HEIGHT * 2) ) {
+		startY = 0;
+	}
+
+	return Rect(0, startY, FIXED_TC_WIDTH, FIXED_TC_HEIGHT);
+}
+
+static Rect getThermalFrameROI(const Mat &rawFrame) {
+	int rawRows = rawFrame.rows;
+	int halfRows = rawRows / 2;
+	int trimPerHalf = max(0, halfRows - FIXED_TC_HEIGHT);
+	int startY = halfRows + (trimPerHalf / 2);
+
+	if ( rawRows < (FIXED_TC_HEIGHT * 2) ) {
+		startY = FIXED_TC_HEIGHT;
+	}
+
+	return Rect(0, startY, FIXED_TC_WIDTH, FIXED_TC_HEIGHT);
+}
+
+static void resetCalibrationDefaults() {
+	calibration.emissivity       = 1.00;
+	calibration.reflectedCelsius = 20.0;
+	calibration.offsetCelsius    = 0.0;
+}
+
+static float calibratedKelvinToCelsius(unsigned short kelvin) {
+	double apparentKelvin = ((double)kelvin / 64.0);
+	double correctedKelvin = apparentKelvin;
+	double emissivity = clampDouble(calibration.emissivity, 0.10, 1.00);
+
+	if ( emissivity < 0.9999 ) {
+		double reflectedKelvin = calibration.reflectedCelsius + 273.15;
+		double correctedKelvin4 = (pow(apparentKelvin, 4.0) -
+					   ((1.0 - emissivity) * pow(reflectedKelvin, 4.0))) / emissivity;
+		if ( correctedKelvin4 > 0.0 ) {
+			correctedKelvin = pow(correctedKelvin4, 0.25);
+		}
+	}
+
+	return (float)((correctedKelvin - 273.15) + calibration.offsetCelsius);
+}
+
+static void printCalibrationStatus() {
+	printf("Calibration: emissivity %.2f  reflected %.1f C  offset %+0.1f C\n",
+	       calibration.emissivity,
+	       calibration.reflectedCelsius,
+	       calibration.offsetCelsius);
+	FF();
+}
 
 static Temperature *user_0  = &users[0];
 static Temperature *user_1  = &users[1];
@@ -1146,6 +1220,30 @@ typedef struct {
 } RenderData;
  
 static ThreadData threadData;
+
+static void adjustCalibrationEmissivity(double delta) {
+	calibration.emissivity = clampDouble(calibration.emissivity + delta, 0.10, 1.00);
+	threadData.configurationChanged++;
+	printCalibrationStatus();
+}
+
+static void adjustCalibrationReflected(double deltaCelsius) {
+	calibration.reflectedCelsius = clampDouble(calibration.reflectedCelsius + deltaCelsius, -40.0, 200.0);
+	threadData.configurationChanged++;
+	printCalibrationStatus();
+}
+
+static void adjustCalibrationOffset(double deltaCelsius) {
+	calibration.offsetCelsius = clampDouble(calibration.offsetCelsius + deltaCelsius, -50.0, 50.0);
+	threadData.configurationChanged++;
+	printCalibrationStatus();
+}
+
+static void resetCalibrationRuntime() {
+	resetCalibrationDefaults();
+	threadData.configurationChanged++;
+	printCalibrationStatus();
+}
 
 #if 1
 #define RERENDER_OPTIMIZATION  ( threadData.configurationChanged || ( ! threadData.inputFile && ! threadData.FreezeFrame ) )
@@ -1669,6 +1767,7 @@ void resetDefaults() {
 	resetFrameCounter();
 
 	resetLockAutoRanging();
+	resetCalibrationDefaults();
 
 	controls.hud          = HUD_HUD;
 
@@ -1692,11 +1791,11 @@ static int HudHeight  	   = 134;   // 134
 static int HelpWidth       = TC_WIDTH;
 static int HelpHeight      = TC_HEIGHT; 
 
-#define MAX_HELP_TEXT_ROWS (20 + 1)  // Was (24 + 1)
-#define MAX_HUD_TEXT_ROWS  ( 9 + 1)
+#define MAX_HELP_TEXT_ROWS (22 + 1)  // Was (24 + 1)
+#define MAX_HUD_TEXT_ROWS  (10 + 1)
 
-const char * LONGEST_HUD_STRING  = "Map: Twighlight Shift+Hist";
-const char * LONGEST_HELP_STRING = "L mb: Add temps, mv rulers ";
+const char * LONGEST_HUD_STRING  = "Cal: e 1.00 refl 100.0C off +10.0C";
+const char * LONGEST_HELP_STRING = "7 9: Emissivity, [ ] : Refl C";
 
 #define MAX_SCALE_FOR_FONT 5.0
 
@@ -1741,6 +1840,10 @@ void setScaleControls() {
 #else
 	ColorScaleWidth = 3 + MyScale;  // 4 to N
 #endif
+	// YUYV conversion requires an even pixel width on newer OpenCV builds.
+	if ( ColorScaleWidth & 1 ) {
+		ColorScaleWidth++;
+	}
 
 	// Help needs to be redrawn based on font change
 	controls.lastHelpScale = -1; // trigger Help to be redrawn
@@ -1833,7 +1936,7 @@ void setDefaults(ProcessedThermalFrame *ptf) {
 	controls.recording       = 0;
 	controls.fullscreen      = 0;
 	controls.lastHelpScale   = -1; // trigger Help to be redrawn
-	controls.windowFormat    = WINDOW_IMAGE;
+	controls.windowFormat    = WINDOW_THERMAL;
 
 	//controls.labelWF         = WFs[ controls.windowFormat ].name;
 
@@ -1894,7 +1997,7 @@ float getCelsius(Mat *thermalFrame, int x, int y) {
 
 	int linearI = (y * TC_WIDTH) + x;
 
-	return kelvin2Celsius( usStartPtr[ linearI ] );
+	return calibratedKelvinToCelsius( usStartPtr[ linearI ] );
 }
 
 // Function removes double evaluation of a and b expression over #define min/max
@@ -2067,7 +2170,7 @@ void getTemperature(Mat *thermalFrame, Temperature &temp) {
 
 	temp.linearI = (y * TC_WIDTH) + x;
 	temp.kelvin  = usStartPtr[ temp.linearI ];
-	temp.celsius = kelvin2Celsius( temp.kelvin );
+	temp.celsius = calibratedKelvinToCelsius( temp.kelvin );
 }
 
 void scaleTemp(Temperature &temp, const char *labelCF) {
@@ -2314,7 +2417,7 @@ void processThermalFrame( ProcessedThermalFrame *ptf, Mat *thermalFrame ) {
 		// Extract Center-of-ThermalFrame Crosshair Kelvin temp
 		ptf->ch.linearI = (TC_HALF_HEIGHT * TC_WIDTH) + (TC_HALF_WIDTH);
 		ptf->ch.kelvin  = usStartPtr[ ptf->ch.linearI ];
-		ptf->ch.celsius = kelvin2Celsius( ptf->ch.kelvin );
+		ptf->ch.celsius = calibratedKelvinToCelsius( ptf->ch.kelvin );
 		divmod( ptf->ch.linearI,  TC_WIDTH, &ptf->ch.row,  &ptf->ch.col );
 		scaleTemp( ptf->ch,  labelCF );
 		// Crosshair Temp does not have a display name
@@ -2469,9 +2572,9 @@ void processThermalFrame( ProcessedThermalFrame *ptf, Mat *thermalFrame ) {
 		}
 
 		// Calculate Celsius from Kelvin
-		ptf->min.celsius = kelvin2Celsius( ptf->min.kelvin );
-		ptf->avg.celsius = kelvin2Celsius( ptf->avg.kelvin );
-		ptf->max.celsius = kelvin2Celsius( ptf->max.kelvin );
+		ptf->min.celsius = calibratedKelvinToCelsius( ptf->min.kelvin );
+		ptf->avg.celsius = calibratedKelvinToCelsius( ptf->avg.kelvin );
+		ptf->max.celsius = calibratedKelvinToCelsius( ptf->max.kelvin );
 
 		// linearI & kelvin does not make sense for Colormap gradient scale widet temps 
 		// because they are derrived percentages
@@ -2519,8 +2622,8 @@ void processThermalFrame( ProcessedThermalFrame *ptf, Mat *thermalFrame ) {
 	// Colormap autoranging requires camera hardware control which we don't have
 
 	if ( lockAutoRanging ) {
-		ptf->minPixel.celsius = kelvin2Celsius( globalKelvinMin );
-		ptf->maxPixel.celsius = kelvin2Celsius( globalKelvinMax );
+		ptf->minPixel.celsius = calibratedKelvinToCelsius( globalKelvinMin );
+		ptf->maxPixel.celsius = calibratedKelvinToCelsius( globalKelvinMax );
 	} else {
 		ptf->minPixel.celsius = ptf->min.celsius;
 		ptf->maxPixel.celsius = ptf->max.celsius;
@@ -2661,13 +2764,14 @@ void newWindow( ProcessedThermalFrame *ptf ) {
 	// Add window manager's resize border with WINDOW_GUI_EXPANDED
 	if ( controls.fullscreen ) {
 		// This allows fullscreen
-		namedWindow( WINDOW_NAME, WINDOW_GUI_EXPANDED );
+		namedWindow( WINDOW_NAME, WINDOW_NORMAL | WINDOW_KEEPRATIO | WINDOW_GUI_EXPANDED );
 		resizeWindow( ptf );
 		setWindowProperty( WINDOW_NAME, WND_PROP_FULLSCREEN, WINDOW_FULLSCREEN );
 	}
 	else {
 		// This allows resizing larger and smaller
-		namedWindow( WINDOW_NAME, WINDOW_AUTOSIZE | WINDOW_KEEPRATIO | WINDOW_GUI_EXPANDED );
+		namedWindow( WINDOW_NAME, WINDOW_NORMAL | WINDOW_KEEPRATIO | WINDOW_GUI_EXPANDED );
+		resizeWindow( ptf );
 	}
 
 	reScale(ptf, 0, 1);
@@ -3093,9 +3197,12 @@ void rotateDisplay( ProcessedThermalFrame *ptf, int rotate ) {
 
 void printUsage() {
   printf("\n");
-  printf( "Camera Usage: \n\t%s -d n (where 'n' is the number of the desired video camera)\n\n", Argv0 );
+  printf( "Camera Usage: \n\t%s -d n (where 'n' is the number of the desired video camera)\n", Argv0 );
+  printf( "\t%s --device /dev/v4l/by-id/... (stable device path also supported)\n\n", Argv0 );
   printf( "Offline Usage: \n\t%s -f input.raw (where input.raw is a raw dump file from %s)\n\n", Argv0, Argv0 );
   printf( "Optional flags:  [-rotate n] [-scale n] [-fullscreen ] [-cmap n] [-fps n] [-font n] [-clip n] [-thick n]\n");
+  printf( "                 [-emissivity n] [-refltemp c] [-temp-offset c]\n");
+  printf( "                 [--camera-profile auto|tc001] [--device path]\n");
 #if 0
   printf( "                 [-help] [-quiet] [-snapshot [prefix]] [-record [prefix]]\n\n");
 #else
@@ -3121,6 +3228,10 @@ void printKeyBindings() {
   printf("p  : Sna[p]shot (both .png and offline .raw)\n");
   printf("h  : Cycle through overlayed screen data\n");
   printf("t  : Toggle between Celsius and Fahrenheit\n");
+  printf("7 9: Adjust emissivity by 0.01\n");
+  printf("[ ]: Adjust reflected/ambient temp by 1 C\n");
+  printf("- =: Adjust displayed temp offset by 0.5 C\n");
+  printf("0  : Reset calibration values\n");
   printf("y  : Toggle Historgram filter (for gray scales)\n");
 // Emulating locking camera's auto ranging the colormap
   printf("l  : [Un]Lock camera's colormap auto ranging\n");
@@ -3181,6 +3292,11 @@ void printVerbose() {
   printUsage();
   printKeyBindings();
 }
+
+static void adjustCalibrationEmissivity(double delta);
+static void adjustCalibrationReflected(double deltaCelsius);
+static void adjustCalibrationOffset(double deltaCelsius);
+static void resetCalibrationRuntime();
 
 void processKeypress(int c, ProcessedThermalFrame *ptf, Mat *frame ) {
 
@@ -3288,6 +3404,14 @@ FILTER_TYPE_CHANGE:
 			  threadData.configurationChanged++;
 			  Use_Histogram = !Use_Histogram; break; // Temp filter
 
+		case '7': adjustCalibrationEmissivity(-0.01); break;
+		case '9': adjustCalibrationEmissivity( 0.01); break;
+		case '[': adjustCalibrationReflected(-1.0); break;
+		case ']': adjustCalibrationReflected( 1.0); break;
+		case '-': adjustCalibrationOffset(-0.5); break;
+		case '=': adjustCalibrationOffset( 0.5); break;
+		case '0': resetCalibrationRuntime(); break;
+
 		case 't': 
 			  threadData.configurationChanged++;
 			  reCF(); break;           // Temp format
@@ -3344,6 +3468,7 @@ FILTER_TYPE_CHANGE:
 		case '?': if ( ! quietStdout ) { 
 				dumpV4L2();
 			  }
+			  printCalibrationStatus();
 		  	  printKeyBindings();
 			  break;
 
@@ -3611,6 +3736,12 @@ void drawCmapScale( Mat &cmapScale, int roiJumpWidth ) {
 		}
 	}
 
+	if ( cmapScale.empty() || (cmapScale.cols & 1) ) {
+		fprintf(stderr, "cmapScale invalid rows(%d) cols(%d) type(%d) ColorScaleWidth(%d)\n",
+			cmapScale.rows, cmapScale.cols, cmapScale.type(), ColorScaleWidth);
+		fflush(stderr);
+	}
+
 	cvtColor(cmapScale, cmapScale, COLOR_YUV2BGR_YUYV, CVT_CHAN_FLAG);  // Same as video frame
 	applyMyColorMap( cmapScale, cmapScale, controls.cmapCurrent );
 
@@ -3692,15 +3823,17 @@ void drawHelp( Mat &rgbHUD ) {
 		PT(  9, "r",   ": Record (.avi)" );
 		PT( 10, "p",   ": Snapshot (.png, .raw)" );
 		PT( 11, "h",   ": OSD modes, 1 : Font" );
-		PT( 12, "t",   ": C/F,  y : Histogram" );
-		PT( 13, "8",   ": Rotate, e Freeze" );
+		PT( 12, "7 9", ": Emissivity, [ ] : Refl C" );
+		PT( 13, "- =", ": Temp offset C, 0 : Reset" );
+		PT( 14, "t",   ": C/F,  y : Histogram" );
+		PT( 15, "8",   ": Rotate, e Freeze" );
 		sprintf( buf,  ": Ruler modes (%d)", RULERS_MAX_MOD-1 );
-		PT( 14, "o", buf );
-		PT( 15, "",    "  3 : Clip, 4 : Size" );
-		PT( 16, "/",   ": stdout, q : Quit" );
-		RT( 17, "Keypad arrows : Move rulers", x1 );
-		RT( 18, "L mb: Add temps, mv rulers", x1 );
-		RT( 19, "R mb: Del temps & rulers", x1 );
+		PT( 16, "o", buf );
+		PT( 17, "",    "  3 : Clip, 4 : Size" );
+		PT( 18, "/",   ": stdout, q : Quit" );
+		RT( 19, "Keypad arrows : Move rulers", x1 );
+		RT( 20, "L mb: Add temps, mv rulers", x1 );
+		RT( 21, "R mb: Del temps & rulers", x1 );
 }
 
 static Point hudPoint;
@@ -3766,6 +3899,13 @@ void drawHUD(ProcessedThermalFrame *ptf, Mat &rgbHUD, const char *src, Scalar sr
 
 	sprintf(buf, "FPS: %.1f  %s", controls.fps, controls.labelWF);
 	POINT( hudPoint, L_X, Y(8) ); 
+	putText(rgbHUD, buf, hudPoint, Default_Font, HudFontScale, YELLOW, 1, hudLineType);
+
+	sprintf(buf, "Cal: e %.2f refl %.1fC off %+0.1fC",
+		calibration.emissivity,
+		calibration.reflectedCelsius,
+		calibration.offsetCelsius);
+	POINT( hudPoint, L_X, Y(9) );
 	putText(rgbHUD, buf, hudPoint, Default_Font, HudFontScale, YELLOW, 1, hudLineType);
 }
 
@@ -4769,8 +4909,6 @@ void *imageDataThread( void *ptr ) {
 	ThreadData *td = (ThreadData *)ptr;
 	ProcessedThermalFrame *ptf = td->ptf;
 
-	Rect imageFrameROI = Rect(0, 0, FIXED_TC_WIDTH, FIXED_TC_HEIGHT);
-
 	TS( int64_t imageMicros; )
 	TS( int64_t tmp; )
 
@@ -4834,10 +4972,6 @@ void *thermalDataThread( void *ptr ) {
 	Rect thermROI;
 	thermROI.x = thermROI.y = 0; // x and y are always ZERO
 
-	// Reuse scratch memory without having to copy
-
-	Rect thermFrameROI = Rect(0, FIXED_TC_HEIGHT, FIXED_TC_WIDTH, FIXED_TC_HEIGHT);
-
        	TS( int64_t thermMicros; )
 
 	Mat *thermalFramePtr; // Parallel Histogram processing
@@ -4899,6 +5033,10 @@ int openCamera( VideoCapture &cap, char *camera, int displayUsage ) {
 	// Convert to COLOR_YUV2BGR_YUYV for playback
 	cap.set(CAP_PROP_CONVERT_RGB, 0.0); 
 	cap.set(CAP_PROP_MONOCHROME,  1.0); 
+	cap.set(CAP_PROP_FOURCC, VideoWriter::fourcc('Y', 'U', 'Y', 'V'));
+	cap.set(CAP_PROP_FRAME_WIDTH,  FIXED_TC_WIDTH);
+	cap.set(CAP_PROP_FRAME_HEIGHT, FIXED_TC_HEIGHT * 2);
+	cap.set(CAP_PROP_FPS, 25.0);
 	// TODO-FIXME - Investigate CAP_PROP_FORMAT and -1 for raw
 	// Can it be set CV_8UC2, 1 channel of unsigned short
 
@@ -4949,6 +5087,15 @@ int openCamera( VideoCapture &cap, char *camera, int displayUsage ) {
 		cap.get(CAP_PROP_EXPOSURE),
 		cap.get(CAP_PROP_SATURATION)
 		);
+	printf("capture width(%.0f) height(%.0f) fourcc(%c%c%c%c) convert_rgb(%.2f)\n",
+		cap.get(CAP_PROP_FRAME_WIDTH),
+		cap.get(CAP_PROP_FRAME_HEIGHT),
+		(int)cap.get(CAP_PROP_FOURCC) & 0xFF,
+		((int)cap.get(CAP_PROP_FOURCC) >> 8) & 0xFF,
+		((int)cap.get(CAP_PROP_FOURCC) >> 16) & 0xFF,
+		((int)cap.get(CAP_PROP_FOURCC) >> 24) & 0xFF,
+		cap.get(CAP_PROP_CONVERT_RGB)
+		);
 	return 1;
 }
 
@@ -4987,9 +5134,10 @@ int parseArgs( int argc, char *argv[], char *camera, VideoCapture &cap, Processe
 			UserFont = abs( atoi( argv[ i + 1 ] ) ) % MAX_USER_FONT;
 			i++;
 		} else if ( ! strcmp( argv[i], "-help") ||
+			    ! strcmp( argv[i], "--help") ||
 			    ! strcmp( argv[i], "-h") ) {
   			printInfo();
-			return(-1);
+			exit(0);
 		} else if ( ! strcmp( argv[i], "-quiet") ||
 			    ! strcmp( argv[i], "-q") ) {
 			quietStdout = 1;
@@ -5008,6 +5156,26 @@ printf("\n%s-record [prefix] is coming soon ...\n%s", BLUE_STR(), RESET_STR() );
 			}
 		} else if ( ! strcmp( argv[i], "-cmap") && hasNext ) {
 			controls.cmapCurrent = abs( atoi( argv[ i + 1 ] ) ) % MAX_CMAPS;
+			i++;
+		} else if ( ! strcmp( argv[i], "-emissivity") && hasNext ) {
+			calibration.emissivity = clampDouble( atof( argv[ i + 1 ] ), 0.10, 1.00 );
+			i++;
+		} else if (( ! strcmp( argv[i], "-refltemp") ||
+			     ! strcmp( argv[i], "-ambient") ) && hasNext ) {
+			calibration.reflectedCelsius = clampDouble( atof( argv[ i + 1 ] ), -40.0, 200.0 );
+			i++;
+		} else if (( ! strcmp( argv[i], "-temp-offset") ||
+			     ! strcmp( argv[i], "-offset") ) && hasNext ) {
+			calibration.offsetCelsius = clampDouble( atof( argv[ i + 1 ] ), -50.0, 50.0 );
+			i++;
+		} else if (( ! strcmp( argv[i], "--camera-profile") ||
+			     ! strcmp( argv[i], "-camera-profile") ) && hasNext ) {
+			if ( strcmp( argv[i + 1], "tc001" ) &&
+			     strcmp( argv[i + 1], "auto" ) ) {
+				printf("%sUnsupported Redux camera profile (%s). Use run-thermal-camera.sh --camera-profile mini640 for Mini640.\n%s",
+				       RED_STR(), argv[i + 1], RESET_STR() );
+				return -1;
+			}
 			i++;
 		} else if ( ! strcmp( argv[i], "-fps") && hasNext ) {
 			offline_fps = abs( atoi( argv[ i + 1 ] ) );
@@ -5045,10 +5213,15 @@ printf("\n%s-record [prefix] is coming soon ...\n%s", BLUE_STR(), RESET_STR() );
 			filterType  = FILTER_TYPE_NONE; // Show Nuked Kelvin data in WINDOW_DOUBLE
 			inputNotFound = 0;
 			i++;
-		} else if (( ! strcmp( argv[i], "-d"      ) ||
-			     ! strcmp( argv[i], "-device" ) ) && hasNext ) {
+		} else if (( ! strcmp( argv[i], "-d"       ) ||
+			     ! strcmp( argv[i], "-device"  ) ||
+			     ! strcmp( argv[i], "--device" ) ) && hasNext ) {
 			threadData.source    = "Camera";
-			sprintf( camera, "/dev/video%d", abs( atoi(argv[i + 1]) ) ); // Default is camera 0
+			if ( argv[i + 1][0] == '/' ) {
+				snprintf( camera, 128, "%s", argv[i + 1] );
+			} else {
+				snprintf( camera, 128, "/dev/video%d", abs( atoi(argv[i + 1]) ) ); // Default is camera 0
+			}
 			threadData.inputFile = 0;
 			if ( ! quietStdout ) {
 //				printf("%s(%d): Opening camera %s\n", __func__,__LINE__, camera ); FF();
@@ -5182,6 +5355,7 @@ int mainPrivate (int argc, char *argv[]) {
 
 	if ( ! quietStdout ) {
 		printVerbose();
+		printCalibrationStatus();
 	}
 
 	int64_t startup4 = currentTimeMicros();
@@ -5205,8 +5379,6 @@ int mainPrivate (int argc, char *argv[]) {
 #if DRAW_SINGLE_THREAD
         nice( -20 );
 
-        Rect imageFrameROI = Rect(0, 0, FIXED_TC_WIDTH, FIXED_TC_HEIGHT);
-
         TS( int64_t imageMicros; )
         TS( int64_t tmp; )
 
@@ -5220,10 +5392,6 @@ int mainPrivate (int argc, char *argv[]) {
 
         Rect thermROI;
         thermROI.x = thermROI.y = 0; // x and y are always ZERO
-
-	// Reuse scratch memory without having to copy
-
-        Rect thermFrameROI = Rect(0, FIXED_TC_HEIGHT, FIXED_TC_WIDTH, FIXED_TC_HEIGHT);
 
         TS( int64_t thermMicros; )
 
@@ -5506,9 +5674,11 @@ int mainPrivate (int argc, char *argv[]) {
 
 #if DRAW_SINGLE_THREAD
 			// Handle Image/Thermal cross dependencies induced by the lockAutoRanging feature
+			Rect thermFrameROI = getThermalFrameROI( *(threadData.rawFrame) );
 			thermalFrame = Mat( *(threadData.rawFrame), thermFrameROI ).clone();
 			if ( RotateDisplay ) { rotate( thermalFrame, thermalFrame, rotateFlags[ RotateDisplay ] ); }
 
+			Rect imageFrameROI = getImageFrameROI( *(threadData.rawFrame) );
 			imageFrame = Mat( *(threadData.rawFrame), imageFrameROI ).clone();
 			if ( RotateDisplay ) { rotate( imageFrame, imageFrame, rotateFlags[ RotateDisplay ] ); }
 
@@ -5768,6 +5938,11 @@ int mainPrivate (int argc, char *argv[]) {
 		// Use following sleepMicros() to throttle FPS
 		int c = (char)waitKeyEx( 1 );
 #endif
+
+		// Exit cleanly if the user closes the HighGUI window from the title bar.
+		if ( getWindowProperty( WINDOW_NAME, WND_PROP_VISIBLE ) < 1 ) {
+			goto SHUTDOWN;
+		}
 			
                 if ( takeSnapshot ) {
                         printf("%s", GREEN_STR() );
